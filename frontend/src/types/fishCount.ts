@@ -8,7 +8,17 @@ export type SizeClass = '0-10cm' | '11-20cm' | '21-30cm' | '>30cm'
 
 export const SIZE_CLASSES: SizeClass[] = ['0-10cm', '11-20cm', '21-30cm', '>30cm']
 
-/** 鱼类与无脊椎动物计数记录 */
+/**
+ * 复核状态（只描述观察员这份计数；标本号与复核结论只认实验室复核单）：
+ * - 待复核：观察员新录 / 补记，或待复检单被观察员改动数量、体长段后退回
+ * - 待复检：实验室镜检后挂出，等观察员重新核对
+ * - 已复核：实验室已出结论，折算密度才进汇总
+ */
+export type FishReviewStatus = '待复核' | '待复检' | '已复核'
+
+export const FISH_REVIEW_STATUSES: FishReviewStatus[] = ['待复核', '待复检', '已复核']
+
+/** 鱼类与无脊椎动物计数记录（观察员台账） */
 export interface FishCount {
   id: string
   /** 所属样带 */
@@ -17,10 +27,12 @@ export interface FishCount {
   family: string
   /** 数量（尾 / 个） */
   count: number
-  /** 体长段 */
+  /** 体长段（观察员记录；实验室改判以复核单为准，不会被补记顶回） */
   sizeClass: SizeClass
   /** 类别 */
   category: CountCategory
+  /** 复核状态：只有已复核的记录才折算密度进汇总 */
+  reviewStatus: FishReviewStatus
   createdAt: number
   updatedAt: number
 }

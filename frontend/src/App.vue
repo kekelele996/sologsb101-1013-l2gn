@@ -5,7 +5,7 @@
  */
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
+import { Aim, Odometer, PieChart } from '@element-plus/icons-vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
@@ -28,11 +28,18 @@ const activeKey = computed(() => {
   if (route.path.startsWith('/reefs/')) return '/reefs'
   if (route.path.startsWith('/sites/')) return '/reefs'
   if (route.path.startsWith('/belts/')) return '/coverage'
+  if (route.path.startsWith('/lab/')) return '/lab/reviews'
   return route.path
 })
 
 const navItems = computed(() => [
   { key: '/reefs', label: '礁区台账', icon: Odometer, badge: String(reefStore.reefs.length) },
+  {
+    key: '/lab/reviews',
+    label: '镜检复核台',
+    icon: Aim,
+    badge: String(surveyStore.suspendedReviews.length)
+  },
   { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) }
 ])
 
@@ -53,7 +60,9 @@ const contextLinks = computed(() => {
     if (belt) links.push({ label: '所属站位样带', path: `/sites/${belt.siteId}/belts` })
     links.push({ label: '珊瑚计数', path: `/belts/${id}/corals` })
     links.push({ label: '鱼类计数', path: `/belts/${id}/fishes` })
+    links.push({ label: '镜检复核台', path: '/lab/reviews' })
   }
+  if (route.path.startsWith('/lab/')) links.push({ label: '礁区台账', path: '/reefs' })
   if (route.path.startsWith('/coverage')) links.push({ label: '礁区台账', path: '/reefs' })
   return links
 })
@@ -70,7 +79,7 @@ function go(path: string): void {
         <span class="app-header__mark">珊</span>
         <div>
           <h1 class="app-header__title">珊瑚礁样带普查与白化分级台</h1>
-          <p class="app-header__sub">礁区 · 站位 · 样带 · 珊瑚分类覆盖 · 白化分级 · 鱼类计数</p>
+          <p class="app-header__sub">礁区 · 站位 · 样带 · 珊瑚分类覆盖 · 白化分级 · 鱼类计数 · 镜检复核</p>
         </div>
       </div>
       <nav class="app-nav">
@@ -108,7 +117,7 @@ function go(path: string): void {
       </span>
       <span>
         礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
-        {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }}
+        {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }} · 复核单 {{ surveyStore.labReviews.length }}
       </span>
     </footer>
   </div>

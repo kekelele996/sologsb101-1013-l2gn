@@ -46,7 +46,7 @@ const router = useRouter()
 const reefStore = useReefStore()
 const surveyStore = useSurveyStore()
 
-const EMPTY_COUNTS: CountMap = { reefs: 0, sites: 0, belts: 0, corals: 0, fishes: 0 }
+const EMPTY_COUNTS: CountMap = { reefs: 0, sites: 0, belts: 0, corals: 0, fishes: 0, labReviews: 0 }
 
 const counts = ref<CountMap>(EMPTY_COUNTS)
 const lastBackupAt = ref<string | null>(null)
@@ -70,6 +70,7 @@ const totals = computed(() => ({
   coralCount: rows.value.reduce((sum, row) => sum + row.coralCount, 0),
   coverCmTotal: rows.value.reduce((sum, row) => sum + row.coverCmTotal, 0),
   fishTotal: rows.value.reduce((sum, row) => sum + row.fishTotal, 0),
+  pendingFishTotal: rows.value.reduce((sum, row) => sum + row.pendingFishTotal, 0),
   avgCoveragePct:
     rows.value.length === 0
       ? 0
@@ -125,6 +126,7 @@ async function refresh(): Promise<void> {
     fishTotal: row.fishTotal,
     invertebrateTotal: row.invertebrateTotal,
     fishDensity: row.fishDensity,
+    pendingFishTotal: row.pendingFishTotal,
     conclusion: ''
   })))
 }
@@ -215,10 +217,10 @@ async function handleDatabaseReset(): Promise<void> {
 
 async function copySummary(): Promise<void> {
   const text = rows.value
-    .map(
-      (row) =>
-        `${row.reefName}｜站位 ${row.siteNo}｜样带 ${row.beltNo}（${row.orientation}向 ${row.lengthM} m）：珊瑚覆盖率 ${row.coveragePct}%，白化指数 ${row.bleachIndex}（${row.grade}），白化占比 ${row.bleachedSharePct}%，鱼类 ${row.fishTotal} 尾（${row.fishDensity} 尾/100m²）`
-    )
+    .map((row) => {
+      const pending = row.pendingFishTotal > 0 ? `；另有 ${row.pendingFishTotal} 尾待复核 / 待复检未计入` : ''
+      return `${row.reefName}｜站位 ${row.siteNo}｜样带 ${row.beltNo}（${row.orientation}向 ${row.lengthM} m）：珊瑚覆盖率 ${row.coveragePct}%，白化指数 ${row.bleachIndex}（${row.grade}），白化占比 ${row.bleachedSharePct}%，已复核鱼类 ${row.fishTotal} 尾（${row.fishDensity} 尾/100m²）${pending}`
+    })
     .join('\n')
   try {
     await navigator.clipboard.writeText(text)
@@ -249,7 +251,8 @@ onMounted(() => {
       <div>
         <h2 class="page__title">白化等级评定与覆盖度汇总</h2>
         <p class="gb-hint">
-          按样带汇总珊瑚覆盖率、白化指数（按覆盖长度加权，0 ~ 4）与鱼类密度，并可按礁区、白化等级筛选；同时提供结构版本查看与 JSON 导入导出。
+          按样带汇总珊瑚覆盖率、白化指数（按覆盖长度加权，0 ~ 4）与鱼类密度；鱼类密度仅采纳
+          <strong>已复核</strong>计数（体长段以实验室镜检复核单改判为准），待复核 / 待复检记录暂不进汇总。
         </p>
       </div>
       <div class="page__actions">
@@ -273,7 +276,7 @@ onMounted(() => {
         :tone="totals.avgBleachIndex > 1 ? 'warning' : 'success'"
         :icon="totals.avgBleachIndex > 1 ? 'WarningFilled' : 'DataLine'"
       />
-      <StatBadge label="鱼类合计" :value="totals.fishTotal" suffix="尾" tone="warning" icon="TrendCharts" />
+      <StatBadge label="鱼类合计（已复核）" :value="totals.fishTotal" suffix="尾" tone="warning" icon="TrendCharts" />
     </div>
 
     <FilterBar
@@ -379,10 +382,13 @@ onMounted(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="鱼类" width="130" align="right">
+        <el-table-column label="鱼类（已复核）" width="140" align="right">
           <template #default="{ row }">
             <span class="gb-mono">{{ row.fishTotal }} 尾</span>
             <div class="gb-hint gb-mono">{{ row.fishDensity }} 尾/100m²</div>
+            <div v-if="row.pendingFishTotal > 0" class="gb-hint" style="color: #d68910">
+              {{ row.pendingFishTotal }} 尾待复核未计
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="无脊椎动物" width="120" align="right">
@@ -440,7 +446,7 @@ onMounted(() => {
       <div class="gb-panel-title">
         <h3>结构版本与全量 JSON 导入导出</h3>
         <span class="gb-hint">
-          导出内容包含 reefs / sites / belts / corals / fishes 五张表 · 最近备份
+          导出内容包含 reefs / sites / belts / corals / fishes / labReviews 六张表 · 最近备份
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}
         </span>
       </div>
@@ -478,7 +484,8 @@ onMounted(() => {
         <el-descriptions-item label="结构版本">v{{ DB_VERSION }}（浏览器记录 v{{ stampedVersion }}）</el-descriptions-item>
         <el-descriptions-item label="礁区 / 站位">{{ counts.reefs }} / {{ counts.sites }}</el-descriptions-item>
         <el-descriptions-item label="样带 / 珊瑚记录">{{ counts.belts }} / {{ counts.corals }}</el-descriptions-item>
-        <el-descriptions-item label="鱼类计数">{{ counts.fishes }}</el-descriptions-item>
+        <el-descriptions-item label="鱼类计数 / 复核单">{{ counts.fishes }} / {{ counts.labReviews }}</el-descriptions-item>
+        <el-descriptions-item label="待复核未计尾数">{{ totals.pendingFishTotal }} 尾 / 个</el-descriptions-item>
         <el-descriptions-item label="最近备份时间">
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}
         </el-descriptions-item>

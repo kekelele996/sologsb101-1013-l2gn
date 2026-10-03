@@ -48,7 +48,7 @@ const cards = computed(() =>
     const belts = beltStore.belts.filter((belt) => siteIds.has(belt.siteId))
     const beltIds = new Set(belts.map((belt) => belt.id))
     const corals = surveyStore.corals.filter((coral) => beltIds.has(coral.beltId))
-    const fishes = surveyStore.fishes.filter((fish) => beltIds.has(fish.beltId))
+    const fishes = surveyStore.fishes.filter((fish) => beltIds.has(fish.beltId) && fish.reviewStatus === '已复核')
     const index = bleachIndex(corals)
     return {
       reef,

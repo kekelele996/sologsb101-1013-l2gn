@@ -41,18 +41,23 @@ const form = reactive({
   observer: ''
 })
 
-/** 样带行：回显珊瑚记录数、鱼类记录数、覆盖率与白化指数 */
+/** 样带行：回显珊瑚记录数、鱼类记录数、覆盖率与白化指数（密度只算已复核计数） */
 const rows = computed(() =>
   beltStore.beltsOfSite(siteId.value).map((belt) => {
     const corals = surveyStore.coralsOfBelt(belt.id)
     const fishes = surveyStore.fishesOfBelt(belt.id)
+    const reviewedFishes = fishes.filter((fish) => fish.reviewStatus === '已复核')
     const coverCmTotal = corals.reduce((sum, coral) => sum + coral.coverCm, 0)
     const index = bleachIndex(corals)
-    const fishTotal = fishes.filter((fish) => fish.category === '鱼类').reduce((sum, fish) => sum + fish.count, 0)
+    const fishTotal = reviewedFishes
+      .filter((fish) => fish.category === '鱼类')
+      .reduce((sum, fish) => sum + fish.count, 0)
+    const pendingCount = fishes.filter((fish) => fish.reviewStatus !== '已复核').length
     return {
       belt,
       coralCount: corals.length,
       fishCount: fishes.length,
+      pendingCount,
       coverCmTotal,
       coveragePct: coralCoveragePct(coverCmTotal, belt.lengthM),
       bleachIndex: index,
@@ -288,11 +293,12 @@ onMounted(() => {
             </el-button>
           </template>
         </el-table-column>
-        <el-table-column label="鱼类计数" width="120" align="center">
+        <el-table-column label="鱼类计数" width="130" align="center">
           <template #default="{ row }">
             <el-button text type="primary" size="small" @click="gotoFishes(row.belt)">
               {{ row.fishCount }} 条
             </el-button>
+            <div v-if="row.pendingCount > 0" class="gb-hint" style="color: #d68910">{{ row.pendingCount }} 条待复核</div>
           </template>
         </el-table-column>
         <el-table-column label="珊瑚覆盖率" width="130" align="right">

@@ -1,13 +1,15 @@
 <script setup lang="ts">
 /**
- * 模块 5：/belts/:id/fishes 鱼类与无脊椎动物计数
- * 按科名与体长段汇总并折算密度；支持批量粘贴与批量改类别，
+ * 模块 5：/belts/:id/fishes 鱼类与无脊椎动物计数（观察员台账）
+ * 按科名与体长段汇总并折算密度；支持批量粘贴与批量改类别。
+ * 复核分账：标本号 / 复核体长段 / 复核结论只认实验室复核单（/lab/reviews）；
+ * 待复核 / 待复检记录不折算密度进汇总；待复检记录被改动数量或体长段后退回待复核。
  * 深链访问时样带不存在给出友好空态。复用 <StatBadge>、<EmptyPanel>。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, DocumentCopy, Edit, Plus } from '@element-plus/icons-vue'
+import { Delete, DocumentCopy, Edit, Plus, View } from '@element-plus/icons-vue'
 import StatBadge from '@/components/common/StatBadge.vue'
 import EmptyPanel from '@/components/common/EmptyPanel.vue'
 import RouteMissingPanel from '@/components/common/RouteMissingPanel.vue'
@@ -20,7 +22,7 @@ import {
   parseFishPaste,
   SIZE_CLASSES
 } from '@/types/fishCount'
-import type { CountCategory, FishCount, SizeClass } from '@/types/fishCount'
+import type { CountCategory, FishCount, FishReviewStatus, SizeClass } from '@/types/fishCount'
 import { fishDensity } from '@/utils/bleach'
 import { initDatabase } from '@/utils/db'
 
@@ -56,13 +58,25 @@ const records = computed(() => {
   return list.filter((record) => record.category === categoryFilter.value)
 })
 
-/** 按科名 + 体长段汇总 */
+/** 按科名 + 生效体长段汇总（仅已复核，体长段以实验室改判为准） */
 const summary = computed(() => surveyStore.fishSummaryOfBelt(beltId.value))
 
-/** 按体长段汇总（鱼类与无脊椎动物合计） */
+/** 已复核计数（折算密度口径） */
+const reviewedRecords = computed(() =>
+  surveyStore.fishesOfBelt(beltId.value).filter((record) => record.reviewStatus === '已复核')
+)
+
+/** 待复核 / 待复检计数（暂不进汇总） */
+const pendingRecords = computed(() =>
+  surveyStore.fishesOfBelt(beltId.value).filter((record) => record.reviewStatus !== '已复核')
+)
+
+/** 按体长段汇总（只统计已复核记录，体长段用实验室改判后的值） */
 const sizeSummary = computed(() =>
   SIZE_CLASSES.map((sizeClass) => {
-    const list = surveyStore.fishesOfBelt(beltId.value).filter((record) => record.sizeClass === sizeClass)
+    const list = reviewedRecords.value.filter(
+      (record) => surveyStore.effectiveSizeClass(record) === sizeClass
+    )
     return {
       sizeClass,
       count: list.reduce((sum, record) => sum + record.count, 0),
@@ -71,12 +85,20 @@ const sizeSummary = computed(() =>
   })
 )
 
+const REVIEW_TAG_TYPE: Record<FishReviewStatus, 'warning' | 'danger' | 'success'> = {
+  待复核: 'warning',
+  待复检: 'danger',
+  已复核: 'success'
+}
+
 const stats = computed(() => {
   const list = surveyStore.fishesOfBelt(beltId.value)
-  const fishTotal = list.filter((record) => record.category === '鱼类').reduce((sum, record) => sum + record.count, 0)
-  const invertebrateTotal = list
+  const counted = reviewedRecords.value
+  const fishTotal = counted.filter((record) => record.category === '鱼类').reduce((sum, record) => sum + record.count, 0)
+  const invertebrateTotal = counted
     .filter((record) => record.category === '无脊椎动物')
     .reduce((sum, record) => sum + record.count, 0)
+  const pendingTotal = pendingRecords.value.reduce((sum, record) => sum + record.count, 0)
   const lengthM = belt.value?.lengthM ?? 0
   return {
     recordCount: list.length,
@@ -85,9 +107,16 @@ const stats = computed(() => {
     total: fishTotal + invertebrateTotal,
     fishDensity: fishDensity(fishTotal, lengthM),
     invertebrateDensity: fishDensity(invertebrateTotal, lengthM),
-    familyCount: new Set(list.map((record) => record.family)).size
+    familyCount: new Set(counted.map((record) => record.family)).size,
+    pendingCount: pendingRecords.value.length,
+    pendingTotal
   }
 })
+
+/** 某条记录的实验室复核单（标本号 / 改判体长段 / 结论） */
+function reviewOf(row: FishCount) {
+  return surveyStore.reviewOfFish(row.id)
+}
 
 function openCreate(): void {
   editingId.value = null
@@ -124,12 +153,23 @@ async function submitForm(): Promise<void> {
       sizeClass: form.sizeClass,
       category: form.category
     }
+    const editing = editingId.value
+      ? surveyStore.fishes.find((item) => item.id === editingId.value) ?? null
+      : null
     if (editingId.value) {
       await surveyStore.updateFish(editingId.value, payload)
-      ElMessage.success('计数记录已更新')
+      if (
+        editing &&
+        editing.reviewStatus === '待复检' &&
+        (payload.count !== editing.count || payload.sizeClass !== editing.sizeClass)
+      ) {
+        ElMessage.success('计数记录已更新，待复检记录改动后已退回待复核，密度先不进汇总')
+      } else {
+        ElMessage.success('计数记录已更新')
+      }
     } else {
       await surveyStore.createFish(beltId.value, payload)
-      ElMessage.success('计数记录已新增，密度已重算')
+      ElMessage.success('计数记录已新增，待实验室镜检复核后密度才进汇总')
     }
     dialogVisible.value = false
   } finally {
@@ -168,10 +208,7 @@ async function bulkSetCategory(category: CountCategory): Promise<void> {
     ElMessage.warning('请先勾选要批量改类别的记录')
     return
   }
-  const now = Date.now()
-  await Promise.all(
-    selectedIds.value.map((id) => surveyStore.updateFish(id, { category, updatedAt: now } as never))
-  )
+  await Promise.all(selectedIds.value.map((id) => surveyStore.updateFish(id, { category })))
   ElMessage.success(`已批量将 ${selectedIds.value.length} 条记录改为「${category}」`)
   selectedIds.value = []
 }
@@ -199,7 +236,7 @@ async function importPaste(): Promise<void> {
   }
   try {
     await ElMessageBox.confirm(
-      `将用 ${parsed.rows.length} 行数据覆盖该样带现有 ${surveyStore.fishesOfBelt(beltId.value).length} 条计数记录，确认导入？`,
+      `将用 ${parsed.rows.length} 行数据覆盖该样带现有 ${surveyStore.fishesOfBelt(beltId.value).length} 条计数记录（导入后均为待复核），确认导入？`,
       '批量导入确认',
       { type: 'warning', confirmButtonText: '覆盖导入', cancelButtonText: '取消' }
     )
@@ -208,7 +245,7 @@ async function importPaste(): Promise<void> {
   }
   const count = await surveyStore.importFishRows(beltId.value, parsed.rows)
   pasteVisible.value = false
-  ElMessage.success(`已导入 ${count} 条计数记录`)
+  ElMessage.success(`已导入 ${count} 条计数记录，等待实验室复核`)
 }
 
 function barPercent(value: number, total: number): string {
@@ -218,6 +255,15 @@ function barPercent(value: number, total: number): string {
 
 function gotoCoral(): void {
   void router.push(`/belts/${beltId.value}/corals`)
+}
+
+function gotoReviews(): void {
+  void router.push('/lab/reviews')
+}
+
+/** 待复核 / 待复检行底色提示：这些数量暂不折算密度进汇总 */
+function rowClassName({ row }: { row: FishCount }): string {
+  return row.reviewStatus === '已复核' ? '' : 'gb-row-pending'
 }
 
 onMounted(() => {
@@ -262,7 +308,9 @@ onMounted(() => {
             <el-tag size="small" type="info" effect="plain">长 {{ belt.lengthM }} m × 宽 1 m</el-tag>
           </h2>
           <p class="gb-hint">
-            按科名与体长段逐条录入数量，密度按「尾 / 100 m²」折算（样带宽度按 1 m 计）；可按类别筛选与批量改判。
+            按科名与体长段逐条录入数量；本页是观察员台账，标本号、复核体长段与结论以
+            <el-button text type="primary" size="small" :icon="View" @click="gotoReviews">实验室镜检复核单</el-button>
+            为准。密度按「尾 / 100 m²」折算（样带宽度按 1 m 计），仅已复核记录进汇总。
           </p>
         </div>
         <div class="page__actions">
@@ -272,17 +320,25 @@ onMounted(() => {
         </div>
       </div>
 
+      <el-alert
+        v-if="stats.pendingCount > 0"
+        type="warning"
+        :closable="false"
+        show-icon
+        :title="`${stats.pendingCount} 条、共 ${stats.pendingTotal} 尾 / 个计数尚未通过复核（待复核 / 待复检），折算密度暂不进汇总。`"
+      />
+
       <div class="gb-stats-row">
         <StatBadge label="计数记录" :value="stats.recordCount" suffix="条" icon="DataLine" />
-        <StatBadge label="鱼类合计" :value="stats.fishTotal" suffix="尾" tone="info" icon="Histogram" />
-        <StatBadge label="无脊椎动物" :value="stats.invertebrateTotal" suffix="个" tone="warning" icon="PieChart" />
+        <StatBadge label="鱼类合计（已复核）" :value="stats.fishTotal" suffix="尾" tone="info" icon="Histogram" />
+        <StatBadge label="无脊椎动物（已复核）" :value="stats.invertebrateTotal" suffix="个" tone="warning" icon="PieChart" />
         <StatBadge label="鱼类密度" :value="stats.fishDensity" suffix="尾/100m²" tone="success" icon="TrendCharts" />
-        <StatBadge label="科名数" :value="stats.familyCount" suffix="科" tone="default" icon="Files" />
+        <StatBadge label="待复核 / 待复检" :value="stats.pendingCount" suffix="条" tone="danger" icon="WarningFilled" />
       </div>
 
       <el-card v-if="stats.recordCount > 0" shadow="never" class="gb-panel">
         <div class="gb-panel-title">
-          <h3>汇总视图</h3>
+          <h3>汇总视图（仅已复核，体长段以实验室改判为准）</h3>
           <div class="page__bulk">
             <span class="gb-hint">批量改类别：</span>
             <el-button v-for="category in COUNT_CATEGORIES" :key="category" size="small" @click="bulkSetCategory(category)">
@@ -363,29 +419,57 @@ onMounted(() => {
         @secondary="openPaste"
       />
 
-      <el-table v-else :data="records" border stripe class="gb-table-compact">
+      <el-table v-else :data="records" border stripe class="gb-table-compact" :row-class-name="rowClassName">
         <el-table-column label="选择" width="70" align="center">
           <template #default="{ row }">
             <el-checkbox :model-value="selectedIds.includes(row.id)" @change="() => toggleSelect(row.id)" />
           </template>
         </el-table-column>
-        <el-table-column prop="family" label="科名" min-width="140" />
-        <el-table-column label="类别" width="120">
+        <el-table-column prop="family" label="科名" min-width="130" />
+        <el-table-column label="类别" width="110">
           <template #default="{ row }">
             <el-tag size="small" :type="row.category === '鱼类' ? 'primary' : 'warning'" effect="plain">
               {{ row.category }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="sizeClass" label="体长段" width="120" />
-        <el-table-column label="数量" width="100" align="right">
+        <el-table-column label="复核状态" width="100" align="center">
+          <template #default="{ row }: { row: FishCount }">
+            <el-tag size="small" :type="REVIEW_TAG_TYPE[row.reviewStatus]" effect="plain">{{ row.reviewStatus }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="观察员体长段" width="120">
+          <template #default="{ row }">
+            <span class="gb-mono">{{ row.sizeClass }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="实验室复核" min-width="190">
+          <template #default="{ row }">
+            <template v-if="reviewOf(row)">
+              <div class="gb-mono">
+                <el-tag v-if="reviewOf(row)?.reviewedSizeClass !== row.sizeClass" size="small" type="danger" effect="plain">
+                  改判 {{ reviewOf(row)?.reviewedSizeClass }}
+                </el-tag>
+                <span v-else>{{ reviewOf(row)?.reviewedSizeClass }}</span>
+              </div>
+              <div class="gb-hint">
+                {{ reviewOf(row)?.verdict }} · 标本号 {{ reviewOf(row)?.specimenNo || '未编号' }}
+              </div>
+            </template>
+            <span v-else class="gb-hint">实验室尚未出单</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="数量" width="90" align="right">
           <template #default="{ row }">
             <span class="gb-mono">{{ row.count }}</span>
           </template>
         </el-table-column>
         <el-table-column label="折算密度" width="150" align="right">
           <template #default="{ row }">
-            <span class="gb-mono">{{ fishDensity(row.count, belt.lengthM) }} 尾/100m²</span>
+            <span v-if="row.reviewStatus === '已复核'" class="gb-mono">
+              {{ fishDensity(row.count, belt.lengthM) }} 尾/100m²
+            </span>
+            <el-tag v-else size="small" type="info" effect="plain">不进汇总</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="170" fixed="right">
@@ -521,5 +605,9 @@ onMounted(() => {
   margin-top: 10px;
   max-height: 160px;
   overflow: auto;
+}
+
+:deep(.gb-row-pending td) {
+  background: #fdf6ec;
 }
 </style>

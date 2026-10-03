@@ -11,6 +11,8 @@ import {
   stampBackupTime,
   type BackupPayload
 } from '@/utils/db'
+import type { FishCount } from '@/types/fishCount'
+import type { LabReviewSheet } from '@/types/labReview'
 import {
   BLEACH_LEVELS,
   type BleachLevel
@@ -18,19 +20,20 @@ import {
 import { bleachGrade, bleachIndex, bleachedSharePct, coralCoveragePct, fishDensity, round } from '@/utils/bleach'
 
 /** 备份集合键名 */
-export const BACKUP_KEYS = ['reefs', 'sites', 'belts', 'corals', 'fishes'] as const
+export const BACKUP_KEYS = ['reefs', 'sites', 'belts', 'corals', 'fishes', 'labReviews'] as const
 export type BackupKey = (typeof BACKUP_KEYS)[number]
 
 export type CountMap = Record<BackupKey, number>
 
-/** 组装当前本地数据的完整快照 */
+/** 组装当前本地数据的完整快照（观察员计数与实验室复核单各存一份） */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+  const [reefs, sites, belts, corals, fishes, labReviews] = await Promise.all([
     db.reefs.toArray(),
     db.sites.toArray(),
     db.belts.toArray(),
     db.corals.toArray(),
-    db.fishes.toArray()
+    db.fishes.toArray(),
+    db.labReviews.toArray()
   ])
   return {
     app: 'gbcoralbelt',
@@ -40,7 +43,8 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     sites,
     belts,
     corals,
-    fishes
+    fishes,
+    labReviews
   }
 }
 
@@ -55,6 +59,8 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     errors.push('app 字段应为 gbcoralbelt，文件来源不明')
   }
   for (const key of BACKUP_KEYS) {
+    // labReviews 为 v3 新增，旧备份允许缺省（按空数组处理）
+    if (key === 'labReviews') continue
     if (!Array.isArray(obj[key])) errors.push(`${key} 字段缺失或不是数组`)
   }
   if (errors.length > 0) return { ok: false, errors, payload: null }
@@ -66,9 +72,17 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     sites: obj.sites ?? [],
     belts: obj.belts ?? [],
     corals: obj.corals ?? [],
-    fishes: obj.fishes ?? []
+    fishes: withFishReviewStatus(obj.fishes ?? []),
+    labReviews: Array.isArray(obj.labReviews) ? (obj.labReviews as LabReviewSheet[]) : []
   }
   return { ok: true, errors, payload }
+}
+
+/** 旧备份（v2 及以前）的计数没有复核状态，按现有记录补一版「已复核」 */
+function withFishReviewStatus(fishes: FishCount[]): FishCount[] {
+  return fishes.map((fish) =>
+    typeof fish.reviewStatus === 'string' ? fish : { ...fish, reviewStatus: '已复核' as const }
+  )
 }
 
 /** 统计快照各表行数 */
@@ -78,7 +92,8 @@ export function countPayload(payload: BackupPayload): CountMap {
     sites: payload.sites.length,
     belts: payload.belts.length,
     corals: payload.corals.length,
-    fishes: payload.fishes.length
+    fishes: payload.fishes.length,
+    labReviews: payload.labReviews.length
   }
 }
 
@@ -114,13 +129,18 @@ export function readFileText(file: File): Promise<string> {
 /** 导入快照：overwrite=true 先清空全部表，否则按主键合并 */
 export async function importBackup(payload: BackupPayload, overwrite: boolean): Promise<CountMap> {
   if (overwrite) await clearAllTables()
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
-    await db.reefs.bulkPut(payload.reefs)
-    await db.sites.bulkPut(payload.sites)
-    await db.belts.bulkPut(payload.belts)
-    await db.corals.bulkPut(payload.corals)
-    await db.fishes.bulkPut(payload.fishes)
-  })
+  await db.transaction(
+    'rw',
+    [db.reefs, db.sites, db.belts, db.corals, db.fishes, db.labReviews],
+    async () => {
+      await db.reefs.bulkPut(payload.reefs)
+      await db.sites.bulkPut(payload.sites)
+      await db.belts.bulkPut(payload.belts)
+      await db.corals.bulkPut(payload.corals)
+      await db.fishes.bulkPut(withFishReviewStatus(payload.fishes))
+      await db.labReviews.bulkPut(payload.labReviews)
+    }
+  )
   return countPayload(payload)
 }
 
@@ -129,6 +149,7 @@ export function remapIds(payload: BackupPayload): BackupPayload {
   const reefMap = new Map<string, string>()
   const siteMap = new Map<string, string>()
   const beltMap = new Map<string, string>()
+  const fishMap = new Map<string, string>()
 
   const reefs = payload.reefs.map((reef) => {
     const id = createId('reef')
@@ -150,12 +171,19 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     id: createId('cor'),
     beltId: beltMap.get(coral.beltId) ?? coral.beltId
   }))
-  const fishes = payload.fishes.map((fish) => ({
-    ...fish,
-    id: createId('fsh'),
-    beltId: beltMap.get(fish.beltId) ?? fish.beltId
+  const fishes = withFishReviewStatus(payload.fishes).map((fish) => {
+    const id = createId('fsh')
+    fishMap.set(fish.id, id)
+    return { ...fish, id, beltId: beltMap.get(fish.beltId) ?? fish.beltId }
+  })
+  // 实验室复核单独立分账：重新分配主键，并跟随样带 / 计数重映射
+  const labReviews = payload.labReviews.map((sheet) => ({
+    ...sheet,
+    id: createId('lab'),
+    beltId: sheet.beltId ? (beltMap.get(sheet.beltId) ?? null) : null,
+    fishId: sheet.fishId ? (fishMap.get(sheet.fishId) ?? null) : null
   }))
-  return { ...payload, reefs, sites, belts, corals, fishes }
+  return { ...payload, reefs, sites, belts, corals, fishes, labReviews }
 }
 
 /** 白化等级分布：各等级累计覆盖长度 */
@@ -186,7 +214,9 @@ export interface CoverageLine {
   distribution: BleachDistribution
   fishTotal: number
   invertebrateTotal: number
-  /** 鱼类密度（尾 / 100 m²） */
+  /** 待复核 / 待复检、暂不进汇总的鱼类尾数 */
+  pendingFishTotal: number
+  /** 鱼类密度（尾 / 100 m²，仅已复核） */
   fishDensity: number
   conclusion: string
 }
@@ -201,8 +231,8 @@ export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
     list.push(coral)
     coralsByBelt.set(coral.beltId, list)
   })
-  const fishesByBelt = new Map<string, typeof payload.fishes>()
-  payload.fishes.forEach((fish) => {
+  const fishesByBelt = new Map<string, FishCount[]>()
+  withFishReviewStatus(payload.fishes).forEach((fish) => {
     const list = fishesByBelt.get(fish.beltId) ?? []
     list.push(fish)
     fishesByBelt.set(fish.beltId, list)
@@ -213,7 +243,8 @@ export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
       const site = siteById.get(belt.siteId)
       const reef = site ? reefById.get(site.reefId) : undefined
       const corals = coralsByBelt.get(belt.id) ?? []
-      const fishes = fishesByBelt.get(belt.id) ?? []
+      const fishes = (fishesByBelt.get(belt.id) ?? []).filter((fish) => fish.reviewStatus === '已复核')
+      const allFishes = fishesByBelt.get(belt.id) ?? []
       const coverCmTotal = round(
         corals.reduce((sum, coral) => sum + coral.coverCm, 0),
         1
@@ -230,6 +261,9 @@ export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
       const fishTotal = fishes.filter((fish) => fish.category === '鱼类').reduce((sum, fish) => sum + fish.count, 0)
       const invertebrateTotal = fishes
         .filter((fish) => fish.category === '无脊椎动物')
+        .reduce((sum, fish) => sum + fish.count, 0)
+      const pendingFishTotal = allFishes
+        .filter((fish) => fish.reviewStatus !== '已复核')
         .reduce((sum, fish) => sum + fish.count, 0)
       return {
         beltId: belt.id,
@@ -251,6 +285,7 @@ export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
         distribution,
         fishTotal,
         invertebrateTotal,
+        pendingFishTotal,
         fishDensity: fishDensity(fishTotal, belt.lengthM),
         conclusion:
           corals.length === 0
@@ -300,8 +335,8 @@ export function buildReefSummaries(payload: BackupPayload, lines: CoverageLine[]
       ),
       avgBleachIndex,
       grade: bleachGrade(avgBleachIndex),
-      fishTotal: payload.fishes
-        .filter((fish) => beltIds.has(fish.beltId))
+      fishTotal: withFishReviewStatus(payload.fishes)
+        .filter((fish) => beltIds.has(fish.beltId) && fish.reviewStatus === '已复核')
         .reduce((sum, fish) => sum + fish.count, 0)
     }
   })
