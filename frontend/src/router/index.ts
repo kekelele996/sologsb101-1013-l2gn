@@ -2,7 +2,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 /**
  * 路由表：路径与提示词逐字一致。
- * /reefs、/reefs/:id/sites、/sites/:id/belts、/belts/:id/corals、/belts/:id/fishes、/coverage
+ * /reefs、/reefs/:id/sites、/sites/:id/belts、/belts/:id/corals、/belts/:id/fishes、/fish-reviews、/coverage
  * 全部页面懒加载，构建时自动分包。
  */
 const routes: RouteRecordRaw[] = [
@@ -36,6 +36,12 @@ const routes: RouteRecordRaw[] = [
     name: 'fish-entry',
     component: () => import('@/pages/FishEntry.vue'),
     meta: { title: '鱼类与无脊椎动物计数', icon: 'DataLine' }
+  },
+  {
+    path: '/fish-reviews',
+    name: 'fish-review-board',
+    component: () => import('@/pages/FishReviewBoard.vue'),
+    meta: { title: '镜检复核单台账', icon: 'DocumentChecked' }
   },
   {
     path: '/coverage',

@@ -15,22 +15,27 @@ import {
   BLEACH_LEVELS,
   type BleachLevel
 } from '@/types/coralRecord'
+import { countsIntoDensity, type ReviewStatus } from '@/types/fishCount'
 import { bleachGrade, bleachIndex, bleachedSharePct, coralCoveragePct, fishDensity, round } from '@/utils/bleach'
 
 /** 备份集合键名 */
-export const BACKUP_KEYS = ['reefs', 'sites', 'belts', 'corals', 'fishes'] as const
+export const BACKUP_KEYS = ['reefs', 'sites', 'belts', 'corals', 'fishes', 'fishReviews'] as const
 export type BackupKey = (typeof BACKUP_KEYS)[number]
+
+/** 校验时必须的键：fishReviews 为 v3 新增，旧备份可缺省（按空数组处理） */
+const REQUIRED_BACKUP_KEYS = ['reefs', 'sites', 'belts', 'corals', 'fishes'] as const
 
 export type CountMap = Record<BackupKey, number>
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+  const [reefs, sites, belts, corals, fishes, fishReviews] = await Promise.all([
     db.reefs.toArray(),
     db.sites.toArray(),
     db.belts.toArray(),
     db.corals.toArray(),
-    db.fishes.toArray()
+    db.fishes.toArray(),
+    db.fishReviews.toArray()
   ])
   return {
     app: 'gbcoralbelt',
@@ -40,7 +45,8 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     sites,
     belts,
     corals,
-    fishes
+    fishes,
+    fishReviews
   }
 }
 
@@ -54,8 +60,11 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
   if (obj.app !== undefined && obj.app !== 'gbcoralbelt') {
     errors.push('app 字段应为 gbcoralbelt，文件来源不明')
   }
-  for (const key of BACKUP_KEYS) {
+  for (const key of REQUIRED_BACKUP_KEYS) {
     if (!Array.isArray(obj[key])) errors.push(`${key} 字段缺失或不是数组`)
+  }
+  if (obj.fishReviews !== undefined && !Array.isArray(obj.fishReviews)) {
+    errors.push('fishReviews 字段不是数组')
   }
   if (errors.length > 0) return { ok: false, errors, payload: null }
   const payload: BackupPayload = {
@@ -66,7 +75,9 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     sites: obj.sites ?? [],
     belts: obj.belts ?? [],
     corals: obj.corals ?? [],
-    fishes: obj.fishes ?? []
+    // 旧备份没记复核状态：与库升级同一口径，按现有记录补一版「已复核」
+    fishes: (obj.fishes ?? []).map((fish) => ({ ...fish, reviewStatus: fish.reviewStatus ?? ('已复核' as ReviewStatus) })),
+    fishReviews: obj.fishReviews ?? []
   }
   return { ok: true, errors, payload }
 }
@@ -78,7 +89,8 @@ export function countPayload(payload: BackupPayload): CountMap {
     sites: payload.sites.length,
     belts: payload.belts.length,
     corals: payload.corals.length,
-    fishes: payload.fishes.length
+    fishes: payload.fishes.length,
+    fishReviews: payload.fishReviews.length
   }
 }
 
@@ -114,12 +126,13 @@ export function readFileText(file: File): Promise<string> {
 /** 导入快照：overwrite=true 先清空全部表，否则按主键合并 */
 export async function importBackup(payload: BackupPayload, overwrite: boolean): Promise<CountMap> {
   if (overwrite) await clearAllTables()
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
+  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes, db.fishReviews], async () => {
     await db.reefs.bulkPut(payload.reefs)
     await db.sites.bulkPut(payload.sites)
     await db.belts.bulkPut(payload.belts)
     await db.corals.bulkPut(payload.corals)
     await db.fishes.bulkPut(payload.fishes)
+    await db.fishReviews.bulkPut(payload.fishReviews)
   })
   return countPayload(payload)
 }
@@ -129,6 +142,7 @@ export function remapIds(payload: BackupPayload): BackupPayload {
   const reefMap = new Map<string, string>()
   const siteMap = new Map<string, string>()
   const beltMap = new Map<string, string>()
+  const fishMap = new Map<string, string>()
 
   const reefs = payload.reefs.map((reef) => {
     const id = createId('reef')
@@ -150,12 +164,22 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     id: createId('cor'),
     beltId: beltMap.get(coral.beltId) ?? coral.beltId
   }))
-  const fishes = payload.fishes.map((fish) => ({
-    ...fish,
-    id: createId('fsh'),
-    beltId: beltMap.get(fish.beltId) ?? fish.beltId
-  }))
-  return { ...payload, reefs, sites, belts, corals, fishes }
+  const fishes = payload.fishes.map((fish) => {
+    const id = createId('fsh')
+    fishMap.set(fish.id, id)
+    return { ...fish, id, beltId: beltMap.get(fish.beltId) ?? fish.beltId }
+  })
+  // 复核单跟随计数记录改挂新 id；计数记录缺失的关联断开，退回挂起等人定
+  const fishReviews = payload.fishReviews.map((review) => {
+    const fishId = review.fishId === null ? null : (fishMap.get(review.fishId) ?? null)
+    return {
+      ...review,
+      id: createId('frv'),
+      fishId,
+      reconStatus: review.fishId !== null && fishId === null ? ('挂起' as const) : review.reconStatus
+    }
+  })
+  return { ...payload, reefs, sites, belts, corals, fishes, fishReviews }
 }
 
 /** 白化等级分布：各等级累计覆盖长度 */
@@ -186,8 +210,10 @@ export interface CoverageLine {
   distribution: BleachDistribution
   fishTotal: number
   invertebrateTotal: number
-  /** 鱼类密度（尾 / 100 m²） */
+  /** 鱼类密度（尾 / 100 m²），仅计非待复核记录 */
   fishDensity: number
+  /** 待复核记录数：退回待复核的折算密度暂不进汇总 */
+  pendingReviewCount: number
   conclusion: string
 }
 
@@ -231,6 +257,11 @@ export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
       const invertebrateTotal = fishes
         .filter((fish) => fish.category === '无脊椎动物')
         .reduce((sum, fish) => sum + fish.count, 0)
+      // 折算密度只计非待复核的记录：退回待复核的先不进汇总
+      const densityFishes = fishes.filter(countsIntoDensity)
+      const densityFishTotal = densityFishes
+        .filter((fish) => fish.category === '鱼类')
+        .reduce((sum, fish) => sum + fish.count, 0)
       return {
         beltId: belt.id,
         beltNo: belt.no,
@@ -251,7 +282,8 @@ export function buildCoverageLines(payload: BackupPayload): CoverageLine[] {
         distribution,
         fishTotal,
         invertebrateTotal,
-        fishDensity: fishDensity(fishTotal, belt.lengthM),
+        fishDensity: fishDensity(densityFishTotal, belt.lengthM),
+        pendingReviewCount: fishes.length - densityFishes.length,
         conclusion:
           corals.length === 0
             ? '该样带尚未录入珊瑚记录'

@@ -2,7 +2,7 @@
  * IndexedDB 持久化层（Dexie 封装）
  * - 库名 gbcoralbelt，含数据结构版本号与升级迁移逻辑
  * - 升级时按 version().stores() 补齐索引
- * - 首次打开自动播种互相引用的演示数据（礁区 → 站位 → 样带 → 珊瑚记录/鱼类计数）
+ * - 首次打开自动播种互相引用的演示数据（礁区 → 站位 → 样带 → 珊瑚记录/鱼类计数/镜检复核单）
  * - 纯前端应用：不依赖任何后端服务或数据库服务
  */
 import Dexie, { liveQuery, type Table } from 'dexie'
@@ -11,9 +11,10 @@ import type { Site } from '@/types/site'
 import type { Belt } from '@/types/belt'
 import type { CoralRecord } from '@/types/coralRecord'
 import type { FishCount } from '@/types/fishCount'
+import type { FishReview } from '@/types/fishReview'
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2
+export const DB_VERSION = 3
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbcoralbelt'
@@ -35,6 +36,7 @@ export interface BackupPayload {
   belts: Belt[]
   corals: CoralRecord[]
   fishes: FishCount[]
+  fishReviews: FishReview[]
 }
 
 export class CoralBeltDatabase extends Dexie {
@@ -43,6 +45,7 @@ export class CoralBeltDatabase extends Dexie {
   belts!: Table<Belt, string>
   corals!: Table<CoralRecord, string>
   fishes!: Table<FishCount, string>
+  fishReviews!: Table<FishReview, string>
 
   constructor() {
     super(DB_NAME)
@@ -57,7 +60,7 @@ export class CoralBeltDatabase extends Dexie {
     })
 
     // v2：补齐筛选与统计需要的索引（位置/面积、经纬度/水深、样带长度与朝向、白化等级、类别）
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         reefs: 'id, name, location, protectStatus, areaKm2, manager, updatedAt',
         sites: 'id, reefId, no, lat, lng, depthM, substrate, updatedAt',
@@ -85,6 +88,27 @@ export class CoralBeltDatabase extends Dexie {
               Object.assign(row, factory())
             })
         }
+      })
+
+    // v3：鱼类计数与镜检复核分两份 —— fishes 补复核状态，新增 fishReviews 复核单表（实验室那份）
+    this.version(DB_VERSION)
+      .stores({
+        reefs: 'id, name, location, protectStatus, areaKm2, manager, updatedAt',
+        sites: 'id, reefId, no, lat, lng, depthM, substrate, updatedAt',
+        belts: 'id, siteId, no, lengthM, orientation, surveyDate, observer, updatedAt',
+        corals: 'id, beltId, genus, form, coverCm, bleachLevel, updatedAt',
+        fishes: 'id, beltId, family, count, sizeClass, category, reviewStatus, updatedAt',
+        fishReviews: 'id, batchId, beltNo, family, specimenNo, reconStatus, updatedAt'
+      })
+      .upgrade(async (tx) => {
+        // 迁移：旧数据没记复核状态，按现有记录补一版 —— 历史计数一律视为「已复核」，
+        // 升级前后密度汇总口径保持一致
+        await tx
+          .table('fishes')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            if (typeof row.reviewStatus !== 'string') row.reviewStatus = '已复核'
+          })
       })
   }
 }
@@ -130,6 +154,8 @@ interface SeedFish {
   count: number
   sizeClass: FishCount['sizeClass']
   category: FishCount['category']
+  /** 缺省按「已复核」播种，与旧数据升级回填口径一致 */
+  reviewStatus?: FishCount['reviewStatus']
 }
 
 interface SeedBelt {
@@ -145,8 +171,9 @@ interface SeedBelt {
 }
 
 /**
- * 播种演示数据：3 个礁区 → 4 个站位 → 5 条样带 → 14 条珊瑚记录 + 12 条鱼类计数，
+ * 播种演示数据：3 个礁区 → 4 个站位 → 5 条样带 → 14 条珊瑚记录 + 12 条鱼类计数 + 5 张镜检复核单，
  * 覆盖无 / 轻 / 中 / 重 / 死亡 全部白化等级，保证每个页面打开都有内容、层级路由也能命中真实 id。
+ * 复核单覆盖「已对上（确认 / 待复检）」与「挂起」两种对账结果，便于演示两边各留一份的对账流程。
  */
 export async function seedDemoData(): Promise<void> {
   const now = Date.now()
@@ -254,7 +281,7 @@ export async function seedDemoData(): Promise<void> {
         { id: 'cor_ql01b_3', beltId: 'belt_ql01_b', genus: '鹿角珊瑚属', form: '枝状', coverCm: 430, bleachLevel: '重', remark: '大面积白化，部分死亡' }
       ],
       fishes: [
-        { id: 'fsh_ql01b_1', beltId: 'belt_ql01_b', family: '隆头鱼科', count: 22, sizeClass: '11-20cm', category: '鱼类' },
+        { id: 'fsh_ql01b_1', beltId: 'belt_ql01_b', family: '隆头鱼科', count: 22, sizeClass: '11-20cm', category: '鱼类', reviewStatus: '待复检' },
         { id: 'fsh_ql01b_2', beltId: 'belt_ql01_b', family: '刺尾鱼科', count: 15, sizeClass: '21-30cm', category: '鱼类' },
         { id: 'fsh_ql01b_3', beltId: 'belt_ql01_b', family: '砗磲科', count: 3, sizeClass: '>30cm', category: '无脊椎动物' }
       ]
@@ -314,7 +341,71 @@ export async function seedDemoData(): Promise<void> {
     }
   ]
 
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
+  /** 演示复核单（实验室那份）：批次 RB-DEMO-01，含确认 / 待复检 / 挂起三种对账结果 */
+  const fishReviews: Array<Omit<FishReview, 'createdAt' | 'updatedAt'>> = [
+    {
+      id: 'frv_ql02a_1',
+      batchId: 'RB-DEMO-01',
+      beltNo: 'T-01',
+      family: '石斑鱼科',
+      specimenNo: 'QL2-T01-B01',
+      reviewedSizeClass: '>30cm',
+      conclusion: '确认',
+      reconStatus: '已对上',
+      fishId: 'fsh_ql02a_1',
+      note: '镜检与船上记录一致'
+    },
+    {
+      id: 'frv_yr01a_1',
+      batchId: 'RB-DEMO-01',
+      beltNo: 'T-01',
+      family: '笛鲷科',
+      specimenNo: 'YR-T01-B02',
+      reviewedSizeClass: '21-30cm',
+      conclusion: '确认',
+      reconStatus: '已对上',
+      fishId: 'fsh_yr01a_1',
+      note: ''
+    },
+    {
+      id: 'frv_dz01a_1',
+      batchId: 'RB-DEMO-01',
+      beltNo: 'T-01',
+      family: '海星科',
+      specimenNo: 'DZ-T01-B04',
+      reviewedSizeClass: '11-20cm',
+      conclusion: '确认',
+      reconStatus: '已对上',
+      fishId: 'fsh_dz01a_2',
+      note: ''
+    },
+    {
+      id: 'frv_ql01b_1',
+      batchId: 'RB-DEMO-01',
+      beltNo: 'T-02',
+      family: '隆头鱼科',
+      specimenNo: 'QL-T02-B03',
+      reviewedSizeClass: '21-30cm',
+      conclusion: '待复检',
+      reconStatus: '已对上',
+      fishId: 'fsh_ql01b_1',
+      note: '镜检体长段与船上记录不符，打回复检'
+    },
+    {
+      id: 'frv_pending_1',
+      batchId: 'RB-DEMO-01',
+      beltNo: 'T-02',
+      family: '海胆科',
+      specimenNo: 'QL-T02-B05',
+      reviewedSizeClass: '0-10cm',
+      conclusion: '确认',
+      reconStatus: '挂起',
+      fishId: null,
+      note: '样带编号与科名对不上，挂起等人定'
+    }
+  ]
+
+  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes, db.fishReviews], async () => {
     const stamp = (offset: number): { createdAt: number; updatedAt: number } => ({
       createdAt: now + offset,
       updatedAt: now + offset
@@ -337,9 +428,14 @@ export async function seedDemoData(): Promise<void> {
     )
     await db.fishes.bulkPut(
       belts.flatMap((belt, beltIndex) =>
-        belt.fishes.map((fish, fishIndex) => ({ ...fish, ...stamp(400 + beltIndex * 100 + fishIndex) }))
+        belt.fishes.map((fish, fishIndex) => ({
+          reviewStatus: '已复核' as const,
+          ...fish,
+          ...stamp(400 + beltIndex * 100 + fishIndex)
+        }))
       )
     )
+    await db.fishReviews.bulkPut(fishReviews.map((review, index) => ({ ...review, ...stamp(500 + index) })))
   })
 }
 
@@ -355,8 +451,15 @@ export async function initDatabase(): Promise<void> {
 
 /** 清空全部业务表（导入覆盖与重置共用） */
 export async function clearAllTables(): Promise<void> {
-  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes], async () => {
-    await Promise.all([db.reefs.clear(), db.sites.clear(), db.belts.clear(), db.corals.clear(), db.fishes.clear()])
+  await db.transaction('rw', [db.reefs, db.sites, db.belts, db.corals, db.fishes, db.fishReviews], async () => {
+    await Promise.all([
+      db.reefs.clear(),
+      db.sites.clear(),
+      db.belts.clear(),
+      db.corals.clear(),
+      db.fishes.clear(),
+      db.fishReviews.clear()
+    ])
   })
 }
 
@@ -368,14 +471,15 @@ export async function resetDatabase(): Promise<void> {
 
 /** 统计各表行数，供页脚概览与覆盖度页展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [reefs, sites, belts, corals, fishes] = await Promise.all([
+  const [reefs, sites, belts, corals, fishes, fishReviews] = await Promise.all([
     db.reefs.count(),
     db.sites.count(),
     db.belts.count(),
     db.corals.count(),
-    db.fishes.count()
+    db.fishes.count(),
+    db.fishReviews.count()
   ])
-  return { reefs, sites, belts, corals, fishes }
+  return { reefs, sites, belts, corals, fishes, fishReviews }
 }
 
 /** 写入结构版本号到 localStorage，便于覆盖度页比对 */

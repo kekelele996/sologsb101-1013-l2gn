@@ -17,6 +17,7 @@ import { ORIENTATION_ORDER, useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
 import { BELT_LENGTH_PRESETS, ORIENTATIONS } from '@/types/belt'
 import type { Belt, Orientation } from '@/types/belt'
+import { countsIntoDensity } from '@/types/fishCount'
 import { bleachGrade, bleachIndex, coralCoveragePct, fishDensity } from '@/utils/bleach'
 import { initDatabase } from '@/utils/db'
 
@@ -48,7 +49,10 @@ const rows = computed(() =>
     const fishes = surveyStore.fishesOfBelt(belt.id)
     const coverCmTotal = corals.reduce((sum, coral) => sum + coral.coverCm, 0)
     const index = bleachIndex(corals)
-    const fishTotal = fishes.filter((fish) => fish.category === '鱼类').reduce((sum, fish) => sum + fish.count, 0)
+    // 折算密度只计非待复核的记录：退回待复核的先不进汇总
+    const fishTotal = fishes
+      .filter((fish) => fish.category === '鱼类' && countsIntoDensity(fish))
+      .reduce((sum, fish) => sum + fish.count, 0)
     return {
       belt,
       coralCount: corals.length,

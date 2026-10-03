@@ -5,7 +5,7 @@
  */
 import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { DataLine, Files, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
+import { DataLine, DocumentChecked, Files, Grid, Odometer, PieChart } from '@element-plus/icons-vue'
 import { useReefStore } from '@/stores/reefStore'
 import { useBeltStore } from '@/stores/beltStore'
 import { useSurveyStore } from '@/stores/surveyStore'
@@ -33,6 +33,7 @@ const activeKey = computed(() => {
 
 const navItems = computed(() => [
   { key: '/reefs', label: '礁区台账', icon: Odometer, badge: String(reefStore.reefs.length) },
+  { key: '/fish-reviews', label: '镜检复核单', icon: DocumentChecked, badge: String(surveyStore.fishReviews.length) },
   { key: '/coverage', label: '覆盖度汇总', icon: PieChart, badge: String(surveyStore.corals.length) }
 ])
 
@@ -53,7 +54,9 @@ const contextLinks = computed(() => {
     if (belt) links.push({ label: '所属站位样带', path: `/sites/${belt.siteId}/belts` })
     links.push({ label: '珊瑚计数', path: `/belts/${id}/corals` })
     links.push({ label: '鱼类计数', path: `/belts/${id}/fishes` })
+    links.push({ label: '镜检复核单', path: '/fish-reviews' })
   }
+  if (route.path.startsWith('/fish-reviews')) links.push({ label: '覆盖度汇总', path: '/coverage' })
   if (route.path.startsWith('/coverage')) links.push({ label: '礁区台账', path: '/reefs' })
   return links
 })
@@ -108,7 +111,7 @@ function go(path: string): void {
       </span>
       <span>
         礁区 {{ reefStore.reefs.length }} · 站位 {{ reefStore.sites.length }} · 样带 {{ beltStore.belts.length }} · 珊瑚记录
-        {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }}
+        {{ surveyStore.corals.length }} · 计数记录 {{ surveyStore.fishes.length }} · 复核单 {{ surveyStore.fishReviews.length }}
       </span>
     </footer>
   </div>

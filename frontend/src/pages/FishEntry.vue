@@ -1,8 +1,10 @@
 <script setup lang="ts">
 /**
- * 模块 5：/belts/:id/fishes 鱼类与无脊椎动物计数
+ * 模块 5：/belts/:id/fishes 鱼类与无脊椎动物计数（观察员那份）
  * 按科名与体长段汇总并折算密度；支持批量粘贴与批量改类别，
  * 深链访问时样带不存在给出友好空态。复用 <StatBadge>、<EmptyPanel>。
+ * 复核状态归实验室复核单推进：观察员再动数量或体长段会退回待复核，
+ * 待复核的记录折算密度暂不进汇总；标本号与复核结论只认实验室那份，本页只读回显。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -17,10 +19,12 @@ import { useSurveyStore } from '@/stores/surveyStore'
 import {
   COMMON_FAMILIES,
   COUNT_CATEGORIES,
+  countsIntoDensity,
   parseFishPaste,
+  REVIEW_STATUSES,
   SIZE_CLASSES
 } from '@/types/fishCount'
-import type { CountCategory, FishCount, SizeClass } from '@/types/fishCount'
+import type { CountCategory, FishCount, ReviewStatus, SizeClass } from '@/types/fishCount'
 import { fishDensity } from '@/utils/bleach'
 import { initDatabase } from '@/utils/db'
 
@@ -43,6 +47,7 @@ const pasteText = ref('')
 const pasteErrors = ref<string[]>([])
 const selectedIds = ref<string[]>([])
 const categoryFilter = ref<CountCategory | '全部'>('全部')
+const reviewFilter = ref<ReviewStatus | '全部'>('全部')
 const form = reactive({
   family: '',
   count: 1,
@@ -51,13 +56,22 @@ const form = reactive({
 })
 
 const records = computed(() => {
-  const list = surveyStore.fishesOfBelt(beltId.value)
-  if (categoryFilter.value === '全部') return list
-  return list.filter((record) => record.category === categoryFilter.value)
+  let list = surveyStore.fishesOfBelt(beltId.value)
+  if (categoryFilter.value !== '全部') list = list.filter((record) => record.category === categoryFilter.value)
+  if (reviewFilter.value !== '全部') list = list.filter((record) => record.reviewStatus === reviewFilter.value)
+  return list
 })
 
 /** 按科名 + 体长段汇总 */
 const summary = computed(() => surveyStore.fishSummaryOfBelt(beltId.value))
+
+/** 本样带已对上的实验室复核单（只读） */
+const reviews = computed(() => surveyStore.reviewsOfBelt(beltId.value))
+
+/** 计数记录对应的最新复核单（标本号与结论只认实验室那份） */
+function latestReview(fishId: string) {
+  return surveyStore.latestReviewByFishId.get(fishId)
+}
 
 /** 按体长段汇总（鱼类与无脊椎动物合计） */
 const sizeSummary = computed(() =>
@@ -77,17 +91,32 @@ const stats = computed(() => {
   const invertebrateTotal = list
     .filter((record) => record.category === '无脊椎动物')
     .reduce((sum, record) => sum + record.count, 0)
+  // 折算密度只计非待复核的记录：退回待复核的先不进汇总
+  const densityList = list.filter(countsIntoDensity)
+  const densityFishTotal = densityList
+    .filter((record) => record.category === '鱼类')
+    .reduce((sum, record) => sum + record.count, 0)
+  const densityInvertebrateTotal = densityList
+    .filter((record) => record.category === '无脊椎动物')
+    .reduce((sum, record) => sum + record.count, 0)
   const lengthM = belt.value?.lengthM ?? 0
   return {
     recordCount: list.length,
     fishTotal,
     invertebrateTotal,
     total: fishTotal + invertebrateTotal,
-    fishDensity: fishDensity(fishTotal, lengthM),
-    invertebrateDensity: fishDensity(invertebrateTotal, lengthM),
-    familyCount: new Set(list.map((record) => record.family)).size
+    fishDensity: fishDensity(densityFishTotal, lengthM),
+    invertebrateDensity: fishDensity(densityInvertebrateTotal, lengthM),
+    familyCount: new Set(list.map((record) => record.family)).size,
+    pendingReview: list.length - densityList.length
   }
 })
+
+function reviewStatusTagType(status: ReviewStatus): 'success' | 'warning' | 'danger' {
+  if (status === '已复核') return 'success'
+  if (status === '待复检') return 'danger'
+  return 'warning'
+}
 
 function openCreate(): void {
   editingId.value = null
@@ -125,11 +154,13 @@ async function submitForm(): Promise<void> {
       category: form.category
     }
     if (editingId.value) {
-      await surveyStore.updateFish(editingId.value, payload)
-      ElMessage.success('计数记录已更新')
+      const bounced = await surveyStore.updateFish(editingId.value, payload)
+      ElMessage.success(
+        bounced ? '计数记录已更新：已退回待复核，折算密度暂不进汇总' : '计数记录已更新'
+      )
     } else {
       await surveyStore.createFish(beltId.value, payload)
-      ElMessage.success('计数记录已新增，密度已重算')
+      ElMessage.success('计数记录已新增：待实验室复核后，折算密度才进汇总')
     }
     dialogVisible.value = false
   } finally {
@@ -208,7 +239,7 @@ async function importPaste(): Promise<void> {
   }
   const count = await surveyStore.importFishRows(beltId.value, parsed.rows)
   pasteVisible.value = false
-  ElMessage.success(`已导入 ${count} 条计数记录`)
+  ElMessage.success(`已导入 ${count} 条计数记录，待实验室复核后计入密度汇总`)
 }
 
 function barPercent(value: number, total: number): string {
@@ -218,6 +249,10 @@ function barPercent(value: number, total: number): string {
 
 function gotoCoral(): void {
   void router.push(`/belts/${beltId.value}/corals`)
+}
+
+function gotoReviews(): void {
+  void router.push('/fish-reviews')
 }
 
 onMounted(() => {
@@ -262,11 +297,12 @@ onMounted(() => {
             <el-tag size="small" type="info" effect="plain">长 {{ belt.lengthM }} m × 宽 1 m</el-tag>
           </h2>
           <p class="gb-hint">
-            按科名与体长段逐条录入数量，密度按「尾 / 100 m²」折算（样带宽度按 1 m 计）；可按类别筛选与批量改判。
+            按科名与体长段逐条录入数量，密度按「尾 / 100 m²」折算（样带宽度按 1 m 计）；退回待复核的记录折算密度暂不进汇总，待实验室复核后恢复。
           </p>
         </div>
         <div class="page__actions">
           <el-button :icon="DocumentCopy" @click="openPaste">批量粘贴</el-button>
+          <el-button @click="gotoReviews">镜检复核单 →</el-button>
           <el-button @click="gotoCoral">← 珊瑚计数</el-button>
           <el-button type="primary" :icon="Plus" @click="openCreate">新增计数记录</el-button>
         </div>
@@ -278,6 +314,7 @@ onMounted(() => {
         <StatBadge label="无脊椎动物" :value="stats.invertebrateTotal" suffix="个" tone="warning" icon="PieChart" />
         <StatBadge label="鱼类密度" :value="stats.fishDensity" suffix="尾/100m²" tone="success" icon="TrendCharts" />
         <StatBadge label="科名数" :value="stats.familyCount" suffix="科" tone="default" icon="Files" />
+        <StatBadge label="待复核" :value="stats.pendingReview" suffix="条" tone="warning" icon="WarningFilled" />
       </div>
 
       <el-card v-if="stats.recordCount > 0" shadow="never" class="gb-panel">
@@ -347,6 +384,11 @@ onMounted(() => {
           <el-radio-button value="全部">全部</el-radio-button>
           <el-radio-button v-for="category in COUNT_CATEGORIES" :key="category" :value="category">{{ category }}</el-radio-button>
         </el-radio-group>
+        <span class="gb-hint">复核状态：</span>
+        <el-radio-group v-model="reviewFilter" size="small">
+          <el-radio-button value="全部">全部</el-radio-button>
+          <el-radio-button v-for="status in REVIEW_STATUSES" :key="status" :value="status">{{ status }}</el-radio-button>
+        </el-radio-group>
         <el-button size="small" text type="primary" @click="toggleSelectAll">
           {{ selectedIds.length === records.length && records.length > 0 ? '取消全选' : '全选本页' }}
         </el-button>
@@ -383,9 +425,34 @@ onMounted(() => {
             <span class="gb-mono">{{ row.count }}</span>
           </template>
         </el-table-column>
+        <el-table-column label="复核状态" width="110">
+          <template #default="{ row }">
+            <el-tag size="small" :type="reviewStatusTagType(row.reviewStatus)" effect="plain">
+              {{ row.reviewStatus }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="镜检复核（实验室）" min-width="180">
+          <template #default="{ row }">
+            <template v-if="latestReview(row.id)">
+              <span class="gb-mono">{{ latestReview(row.id)?.specimenNo }}</span>
+              <el-tag
+                size="small"
+                :type="latestReview(row.id)?.conclusion === '确认' ? 'success' : 'danger'"
+                effect="plain"
+                class="page__review-tag"
+              >
+                {{ latestReview(row.id)?.conclusion }}
+              </el-tag>
+              <div class="gb-hint">复核体长段 {{ latestReview(row.id)?.reviewedSizeClass }}</div>
+            </template>
+            <span v-else class="gb-hint">未送检</span>
+          </template>
+        </el-table-column>
         <el-table-column label="折算密度" width="150" align="right">
           <template #default="{ row }">
-            <span class="gb-mono">{{ fishDensity(row.count, belt.lengthM) }} 尾/100m²</span>
+            <span v-if="countsIntoDensity(row)" class="gb-mono">{{ fishDensity(row.count, belt.lengthM) }} 尾/100m²</span>
+            <span v-else class="gb-hint">待复核不入汇总</span>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="170" fixed="right">
@@ -398,6 +465,39 @@ onMounted(() => {
           <EmptyPanel title="暂无计数记录" description="点击右上角「新增计数记录」开始录入。" compact />
         </template>
       </el-table>
+
+      <el-card shadow="never" class="gb-panel">
+        <div class="gb-panel-title">
+          <h3>镜检复核单（实验室那份 · 只读）</h3>
+          <el-button size="small" @click="gotoReviews">前往复核单台账 →</el-button>
+        </div>
+        <p class="gb-hint">
+          标本号与复核结论只认实验室这份；观察员补记不会改动本表，但再动数量或体长段会把对应计数退回待复核。
+        </p>
+        <el-table v-if="reviews.length > 0" :data="reviews" border size="small" class="gb-table-compact">
+          <el-table-column prop="batchId" label="批次号" width="130">
+            <template #default="{ row }">
+              <span class="gb-mono">{{ row.batchId }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="specimenNo" label="标本号" min-width="130">
+            <template #default="{ row }">
+              <span class="gb-mono">{{ row.specimenNo }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="family" label="科名" min-width="110" />
+          <el-table-column prop="reviewedSizeClass" label="复核体长段" width="110" />
+          <el-table-column label="复核结论" width="100">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.conclusion === '确认' ? 'success' : 'danger'" effect="plain">
+                {{ row.conclusion }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="note" label="备注" min-width="160" show-overflow-tooltip />
+        </el-table>
+        <p v-else class="gb-hint">本样带暂无已对上的复核单；实验室送检并对账成功后在此回显。</p>
+      </el-card>
     </template>
 
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑计数记录' : '新增计数记录'" width="540px" :close-on-click-modal="false">
@@ -521,5 +621,9 @@ onMounted(() => {
   margin-top: 10px;
   max-height: 160px;
   overflow: auto;
+}
+
+.page__review-tag {
+  margin-left: 6px;
 }
 </style>

@@ -11,6 +11,7 @@ import { useSurveyStore } from '@/stores/surveyStore'
 import type { BleachLevel, CoralRecord, CoralForm } from '@/types/coralRecord'
 import { BLEACH_LEVELS } from '@/types/coralRecord'
 import type { FishCount } from '@/types/fishCount'
+import { countsIntoDensity } from '@/types/fishCount'
 import {
   bleachGrade,
   bleachIndex,
@@ -148,6 +149,10 @@ export function useCoverage(): UseCoverageResult {
     const invertebrateTotal = beltFishes
       .filter((fish) => fish.category === '无脊椎动物')
       .reduce((sum, fish) => sum + fish.count, 0)
+    // 折算密度只计非待复核的记录：退回待复核的先不进汇总
+    const densityFishTotal = beltFishes
+      .filter((fish) => fish.category === '鱼类' && countsIntoDensity(fish))
+      .reduce((sum, fish) => sum + fish.count, 0)
     return {
       beltId: belt.id,
       beltNo: belt.no,
@@ -170,7 +175,7 @@ export function useCoverage(): UseCoverageResult {
       byForm: groupByForm(beltCorals),
       fishTotal,
       invertebrateTotal,
-      fishDensity: fishDensity(fishTotal, belt.lengthM)
+      fishDensity: fishDensity(densityFishTotal, belt.lengthM)
     }
   }
 
@@ -209,6 +214,10 @@ export function useCoverage(): UseCoverageResult {
       indices.length === 0 ? 0 : round(indices.reduce((sum, value) => sum + value, 0) / indices.length, 2)
     const fishTotal = siteFishes.filter((fish) => fish.category === '鱼类').reduce((sum, fish) => sum + fish.count, 0)
     const totalBeltLength = siteBelts.reduce((sum, belt) => sum + belt.lengthM, 0)
+    // 折算密度只计非待复核的记录：退回待复核的先不进汇总
+    const densityFishTotal = siteFishes
+      .filter((fish) => fish.category === '鱼类' && countsIntoDensity(fish))
+      .reduce((sum, fish) => sum + fish.count, 0)
     return {
       siteId: site.id,
       siteNo: site.no,
@@ -227,7 +236,7 @@ export function useCoverage(): UseCoverageResult {
       invertebrateTotal: siteFishes
         .filter((fish) => fish.category === '无脊椎动物')
         .reduce((sum, fish) => sum + fish.count, 0),
-      fishDensity: fishDensity(fishTotal, totalBeltLength)
+      fishDensity: fishDensity(densityFishTotal, totalBeltLength)
     }
   }
 
@@ -280,7 +289,8 @@ export function useCoverage(): UseCoverageResult {
       const lengthM = belt?.lengthM ?? 0
       return fishes.value
         .filter((fish) => fish.beltId === beltId)
-        .map((record) => ({ record, density: fishDensity(record.count, lengthM) }))
+        // 待复核的记录折算密度先不进汇总，按 0 返回
+        .map((record) => ({ record, density: countsIntoDensity(record) ? fishDensity(record.count, lengthM) : 0 }))
         .sort((a, b) => b.record.count - a.record.count)
     })
   }
